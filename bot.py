@@ -619,7 +619,7 @@ def tor_command(update, context):
             update.message.reply_text("❌ Ошибка установки Tor")
     else:
         update.message.reply_text("⚪ Tor выключен. Включите USE_TOR = True")
-      def proxy_command(update, context):
+        def proxy_command(update, context):
     global USE_PROXY
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
