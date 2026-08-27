@@ -423,7 +423,7 @@ def attack_loop():
                         renew_tor_ip()
                     time.sleep(1)
                 time.sleep(1)
-              continue
+                continue
             elif flood_wait_active:
                 flood_wait_active = False
                 print("✅ Flood wait завершен! АТАКА ПРОДОЛЖАЕТСЯ!")
