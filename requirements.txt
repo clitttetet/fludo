@@ -1,0 +1,6 @@
+telethon>=1.34.0
+python-telegram-bot==13.15
+fake-useragent>=1.4.0
+requests>=2.31.0
+python-socks[asyncio]>=2.4.0
+pysocks>=1.7.1
