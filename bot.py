@@ -619,17 +619,14 @@ def tor_command(update, context):
             update.message.reply_text("❌ Ошибка установки Tor")
     else:
         update.message.reply_text("⚪ Tor выключен. Включите USE_TOR = True")
-        def proxy_command(update, context):
-            
+        def proxy_command(update, context):    
     global USE_PROXY
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
-    
     if not context.args:
         update.message.reply_text(f"🌐 Прокси: {'включены' if USE_PROXY else 'выключены'}\n/proxy on - включить\n/proxy off - выключить")
         return
-    
     if context.args[0].lower() == "on":
         USE_PROXY = True
         update.message.reply_text(f"✅ Прокси ВКЛЮЧЕНЫ\n🧅 Tor IP: {get_current_tor_ip() if USE_TOR and check_tor() else 'Tor не активен'}\n💪 Теперь атака будет использовать прокси и менять IP при флудвейте!")
@@ -638,12 +635,11 @@ def tor_command(update, context):
         update.message.reply_text("✅ Прокси ВЫКЛЮЧЕНЫ\n⚠️ Telegram видит IP сервера\n💪 Атака все равно продолжается бесконечно!")
     else:
         update.message.reply_text("❌ /proxy on или /proxy off")
-
+        
 def help_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
-    
     help_text = """
 🤖 *Telegram Flooder Bot - БЕСКОНЕЧНЫЙ РЕЖИМ*
 
