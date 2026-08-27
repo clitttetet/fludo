@@ -619,7 +619,8 @@ def tor_command(update, context):
             update.message.reply_text("❌ Ошибка установки Tor")
     else:
         update.message.reply_text("⚪ Tor выключен. Включите USE_TOR = True")
-        def proxy_command(update, context):    
+
+def proxy_command(update, context):
     global USE_PROXY
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
@@ -635,7 +636,7 @@ def tor_command(update, context):
         update.message.reply_text("✅ Прокси ВЫКЛЮЧЕНЫ\n⚠️ Telegram видит IP сервера\n💪 Атака все равно продолжается бесконечно!")
     else:
         update.message.reply_text("❌ /proxy on или /proxy off")
-        
+
 def help_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
@@ -752,7 +753,7 @@ def main():
     updater.start_polling()
     updater.idle()
 
-if name == "main":
+if __name__ == "__main__":
     try:
         main()
     except Exception as e:
