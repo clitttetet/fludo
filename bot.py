@@ -65,11 +65,7 @@ def get_tor_download_url():
     arch = platform.machine().lower()
     system = platform.system().lower()
 
-    # Официальное зеркало Tor Project
     base = "https://archive.torproject.org/tor-package-archive/torbrowser"
-
-    # Последняя стабильная версия Tor Expert Bundle
-    # Можно менять при необходимости
     version = "13.5.7"
 
     if system == "linux":
@@ -129,7 +125,6 @@ def extract_tor_archive(archive_path, extract_to):
         print(f"❌ Ошибка распаковки: {e}")
         return None
 
-    # Ищем бинарник tor рекурсивно
     for root, dirs, files in os.walk(extract_to):
         for f in files:
             if f == "tor" or f == "tor.exe":
@@ -158,7 +153,6 @@ def install_tor_portable():
     print("🧅 УСТАНОВКА PORTABLE TOR (без репозиториев)")
     print("=" * 50)
 
-    # Если уже есть — пропускаем
     if os.path.exists(TOR_BIN_PATH):
         print(f"✅ Portable Tor уже установлен: {TOR_BIN_PATH}")
         return TOR_BIN_PATH
@@ -169,7 +163,6 @@ def install_tor_portable():
     archive_path = os.path.join(TOR_DIR, "tor_bundle.tar.gz")
 
     if not download_file(url, archive_path):
-        # Пробуем зеркало
         print("🔄 Пробую альтернативное зеркало...")
         url2 = url.replace("archive.torproject.org", "dist.torproject.org")
         if not download_file(url2, archive_path):
@@ -178,14 +171,12 @@ def install_tor_portable():
 
     bin_path = extract_tor_archive(archive_path, TOR_DIR)
 
-    # Удаляем архив
     try:
         os.remove(archive_path)
     except Exception:
         pass
 
     if bin_path:
-        # Создаём symlink на TOR_BIN_PATH, если нашли в подпапке
         if bin_path != TOR_BIN_PATH:
             try:
                 if os.path.exists(TOR_BIN_PATH):
@@ -194,12 +185,10 @@ def install_tor_portable():
                 os.chmod(TOR_BIN_PATH, 0o755)
             except Exception as e:
                 print(f"⚠️ Не удалось скопировать бинарник: {e}")
-                TOR_BIN_PATH = bin_path  # используем как есть
 
         print(f"✅ Portable Tor установлен: {TOR_BIN_PATH}")
         return TOR_BIN_PATH
 
-    # Фолбэк — системный tor, если есть
     sys_tor = shutil.which("tor")
     if sys_tor:
         print(f"✅ Использую системный Tor: {sys_tor}")
@@ -258,13 +247,10 @@ def start_tor_portable():
         print("❌ Бинарник Tor не найден")
         return False
 
-    # Убиваем старые процессы
     kill_tor_processes()
 
-    # Аргументы запуска
     args = [tor_bin, "-f", TOR_TORRC_PATH]
 
-    # Если torrc по какой-то причине нет — минимальные параметры
     if not os.path.exists(TOR_TORRC_PATH):
         args = [
             tor_bin,
@@ -316,7 +302,6 @@ def ensure_tor():
 
     tor_bin = find_tor_binary()
 
-    # Если Tor нет — качаем portable
     if not tor_bin:
         tor_bin = install_tor_portable()
         if not tor_bin:
@@ -325,16 +310,13 @@ def ensure_tor():
     else:
         print(f"✅ Использую Tor: {tor_bin}")
 
-    # Настраиваем
     configure_tor_portable()
 
-    # Пробуем подключиться к уже запущенному Tor
     if wait_for_tor_ready(timeout=5):
         if check_tor():
             print(f"🧅 Tor уже работает | IP: {get_current_tor_ip()}")
             return True
 
-    # Запускаем
     if not start_tor_portable():
         return False
 
@@ -357,7 +339,6 @@ def ensure_tor():
 def renew_tor_ip():
     """Смена IP в Tor"""
     try:
-        # Через control port
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(5)
         s.connect(('127.0.0.1', 9051))
@@ -371,7 +352,6 @@ def renew_tor_ip():
     except Exception:
         pass
 
-    # Фолбэк — HUP сигнал
     try:
         result = subprocess.run(['pkill', '-HUP', 'tor'], capture_output=True)
         if result.returncode == 0:
@@ -381,7 +361,6 @@ def renew_tor_ip():
     except Exception:
         pass
 
-    # Последний вариант — полный перезапуск
     kill_tor_processes()
     return start_tor_portable()
 
@@ -790,7 +769,8 @@ def attack_command(update, context):
     attack_active = True
     attack_phone = phone
     attack_cycle = 0
-    oauth_cycle = 0    flood_wait_active = False
+    oauth_cycle = 0
+    flood_wait_active = False
     flood_wait_until = 0
 
     if USE_TOR:
@@ -843,7 +823,6 @@ def status_command(update, context):
         update.message.reply_text("⚪ Атака не запущена.")
 
 def tor_command(update, context):
-    global TOR_BIN_PATH
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
@@ -861,7 +840,6 @@ def tor_command(update, context):
         if arg == "reinstall":
             update.message.reply_text("🔄 Переустановка Tor...")
             kill_tor_processes()
-            # Удаляем старый portable Tor
             try:
                 shutil.rmtree(TOR_DIR, ignore_errors=True)
             except Exception:
