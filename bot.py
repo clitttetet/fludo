@@ -35,6 +35,11 @@ CHANGE_IP_EVERY_REQUEST = True
 PROXY_TIMEOUT = 25
 ENCRYPT_IP = True
 
+# Railway: пишем всё в /tmp — там всегда есть права
+TOR_DATA_DIR = "/tmp/tor_data"
+TOR_TORRC_PATH = "/tmp/torrc"
+TOR_LOG_PATH = "/tmp/tor.log"
+
 MODE_ONLY_CODES = "codes"
 MODE_ONLY_REG = "registration"
 MODE_MIX = "mix"
@@ -49,10 +54,9 @@ if not BOT_TOKEN or not ADMIN_IDS:
 
 print(f"✅ Бот запущен! Администраторы: {ADMIN_IDS}")
 
-# ========== TOR НА RAILWAY ==========
+# ========== TOR ==========
 def find_tor_binary():
-    """Railway ставит tor через apt в /usr/bin/tor"""
-    for path in ["/usr/bin/tor", "/usr/sbin/tor"]:
+    for path in ["/usr/bin/tor", "/usr/sbin/tor", "/usr/local/bin/tor"]:
         if os.path.exists(path):
             return path
     return shutil.which("tor")
@@ -71,51 +75,98 @@ def kill_tor_processes():
     except Exception:
         pass
 
-def start_tor():
-    """Запуск tor напрямую бинарником (в Railway нет systemd)"""
-    tor_bin = find_tor_binary()
-    if not tor_bin:
-        print("❌ Бинарник tor не найден. Проверь Dockerfile.")
+def write_torrc():
+    """Пишем torrc в /tmp — там всегда есть права на запись"""
+    try:
+        os.makedirs(TOR_DATA_DIR, exist_ok=True)
+        with open(TOR_TORRC_PATH, "w") as f:
+            f.write(f"SocksPort {TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}\n")
+            f.write("ControlPort 9051\n")
+            f.write("CookieAuthentication 0\n")
+            f.write(f"DataDirectory {TOR_DATA_DIR}\n")
+            f.write(f"Log notice file {TOR_LOG_PATH}\n")
+            f.write("ClientOnly 1\n")
+            f.write("AvoidDiskWrites 1\n")
+        print(f"✅ torrc создан: {TOR_TORRC_PATH}")
+        return True
+    except Exception as e:
+        print(f"❌ Не удалось создать torrc: {e}")
         return False
 
-    # Если уже запущен — не дублируем
+def start_tor():
+    """Запускаем Tor напрямую, лог читаем сразу"""
+    tor_bin = find_tor_binary()
+    if not tor_bin:
+        print("❌ Бинарник tor не найден")
+        return False
+
     if is_tor_process_running():
         print("✅ Tor уже запущен")
         return True
 
-    # torrc уже создан в Dockerfile
-    torrc = "/etc/tor/torrc"
-    if not os.path.exists(torrc):
-        print("⚠️ /etc/tor/torrc не найден, запускаю с параметрами")
-        args = [
-            tor_bin,
-            "--SocksPort", f"{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}",
-            "--ControlPort", "9051",
-            "--CookieAuthentication", "0",
-            "--DataDirectory", "/var/lib/tor",
-        ]
-    else:
-        args = [tor_bin, "-f", torrc]
+    write_torrc()
 
-    print(f"🚀 Запуск Tor: {' '.join(args)}")
+    # Чистим старые логи
     try:
-        log_file = open("/var/log/tor/stdout.log", "a")
+        if os.path.exists(TOR_LOG_PATH):
+            os.remove(TOR_LOG_PATH)
+    except Exception:
+        pass
+
+    args = [tor_bin, "-f", TOR_TORRC_PATH]
+    print(f"🚀 Запуск Tor: {' '.join(args)}")
+
+    try:
+        # stderr+stdout в один пайп
         proc = subprocess.Popen(
             args,
-            stdout=log_file,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            text=True,
+            bufsize=1,
         )
+
+        # Читаем первые строки лога в отдельном потоке, чтобы не блокировать
+        def dump_log():
+            try:
+                for line in proc.stdout:
+                    print(f"[TOR] {line.rstrip()}")
+            except Exception:
+                pass
+
+        threading.Thread(target=dump_log, daemon=True).start()
+
+        # Даём Tor 8 секунд, проверяем, что не упал
+        time.sleep(8)
+        if proc.poll() is not None:
+            print(f"❌ Tor упал с кодом {proc.returncode}")
+            # Покажем лог, если есть
+            try:
+                if os.path.exists(TOR_LOG_PATH):
+                    with open(TOR_LOG_PATH) as f:
+                        print("=== TOR LOG FILE ===")
+                        print(f.read())
+            except Exception:
+                pass
+            return False
+
         print(f"✅ Tor запущен (PID: {proc.pid})")
         return True
     except Exception as e:
         print(f"❌ Ошибка запуска Tor: {e}")
         return False
 
-def wait_for_tor_ready(timeout=90):
-    print(f"⏳ Ожидание SOCKS5 на {TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}...")
+def wait_for_tor_ready(timeout=120):
+    """Ждём открытия SOCKS5-порта, параллельно проверяя, что процесс жив"""
+    print(f"⏳ Ожидание SOCKS5 на {TOR_SOCKS_HOST}:{TOR_SOCKS_PORT} (до {timeout} сек)...")
     start = time.time()
     while time.time() - start < timeout:
+        # Если процесс умер — выходим сразу
+        if not is_tor_process_running():
+            print("❌ Процесс Tor умер во время ожидания")
+            return False
+
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2)
@@ -125,7 +176,16 @@ def wait_for_tor_ready(timeout=90):
             return True
         except Exception:
             time.sleep(2)
-    print("❌ SOCKS5 порт не открылся")
+
+    print("❌ SOCKS5 порт не открылся за отведённое время")
+    # Печатаем лог файла
+    try:
+        if os.path.exists(TOR_LOG_PATH):
+            with open(TOR_LOG_PATH) as f:
+                print("=== TOR LOG FILE ===")
+                print(f.read())
+    except Exception:
+        pass
     return False
 
 def ensure_tor():
@@ -135,32 +195,48 @@ def ensure_tor():
 
     tor_bin = find_tor_binary()
     if not tor_bin:
-        print("❌ Tor не найден. Убедись что в Dockerfile есть apt-get install tor")
+        print("❌ Tor не найден. Проверь Dockerfile.")
         return False
-
     print(f"✅ Tor: {tor_bin}")
+
+    # Если уже слушает — ничего не делаем
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect((TOR_SOCKS_HOST, TOR_SOCKS_PORT))
+        s.close()
+        print(f"🧅 Tor уже слушает на {TOR_SOCKS_PORT}")
+        return True
+    except Exception:
+        pass
+
+    # Чистим старые процессы и запускаем заново
+    kill_tor_processes()
+    time.sleep(1)
 
     if not start_tor():
         return False
 
-    if not wait_for_tor_ready(timeout=90):
-        print("⚠️ Перезапуск Tor...")
+    if not wait_for_tor_ready(timeout=120):
+        print("⚠️ Первая попытка не удалась, перезапускаю Tor...")
         kill_tor_processes()
         time.sleep(2)
-        start_tor()
-        if not wait_for_tor_ready(timeout=60):
-            print("❌ Tor не работает")
+        # Чистим data на случай битого state
+        try:
+            shutil.rmtree(TOR_DATA_DIR, ignore_errors=True)
+        except Exception:
+            pass
+        os.makedirs(TOR_DATA_DIR, exist_ok=True)
+        if not start_tor():
+            return False
+        if not wait_for_tor_ready(timeout=90):
+            print("❌ Tor так и не запустился")
             return False
 
-    if check_tor():
-        print(f"🧅 Tor РАБОТАЕТ | IP: {get_current_tor_ip()}")
-    else:
-        print("⚠️ Tor запущен, но check.torproject.org не отвечает")
-
+    print(f"🧅 Tor РАБОТАЕТ | IP: {get_current_tor_ip()}")
     return True
 
 def renew_tor_ip():
-    """Смена IP через control port 9051"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(5)
@@ -540,21 +616,15 @@ def attack_loop():
 
     print(f"\n🛑 АТАКА ОСТАНОВЛЕНА | Циклов: {attack_cycle}\n")
 
-# ========== КОМАНДЫ БОТА ==========
+# ========== КОМАНДЫ ==========
 def start(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
-
     tor_status = "✅" if USE_TOR and check_tor() else "❌" if USE_TOR else "⚪"
     tor_ip = get_current_tor_ip() if USE_TOR and check_tor() else "-"
-
     update.message.reply_text(
-        f"🤖 *Bot - Railway Edition*\n\n"
-        f"🧅 Tor: {tor_status}\n"
-        f"🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n"
-        f"🟢 IP: {tor_ip}\n\n"
-        f"/attack +79991234567\n/stop\n/status\n/tor\n/tor change\n/proxy on|off",
+        f"🤖 *Bot Railway*\n\n🧅 Tor: {tor_status}\n🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n🟢 IP: {tor_ip}\n\n/attack +79991234567\n/stop\n/status\n/tor\n/tor change",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -590,10 +660,7 @@ def attack_command(update, context):
     else:
         tor_ip = "Tor не активен"
 
-    update.message.reply_text(
-        f"✅ Атака на {phone}\n🧅 Tor IP: {tor_ip}\n⏹️ /stop",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    update.message.reply_text(f"✅ Атака на {phone}\n🧅 Tor IP: {tor_ip}\n⏹️ /stop", parse_mode=ParseMode.MARKDOWN)
 
     attack_thread = threading.Thread(target=attack_loop)
     attack_thread.daemon = False
@@ -611,11 +678,10 @@ def status_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
-
     if attack_active:
         runtime = int(time.time() - attack_start_time) if attack_start_time else 0
         tor_ip = get_current_tor_ip() if USE_TOR and check_tor() else "Tor не активен"
-        flood_status = f"⏳ Flood wait: {int(flood_wait_until - time.time())} сек" if flood_wait_active and time.time() < flood_wait_until else "✅ Нет flood wait"
+        flood_status = f"⏳ {int(flood_wait_until - time.time())} сек" if flood_wait_active and time.time() < flood_wait_until else "✅ Нет flood wait"
         update.message.reply_text(
             f"🟢 Атака активна\n📱 {attack_phone}\n🔄 Циклов: {attack_cycle}\n🌍 OAuth: {oauth_cycle}\n⏱️ {runtime//60}:{runtime%60:02d}\n🧅 {tor_ip}\n🌊 {flood_status}",
             parse_mode=ParseMode.MARKDOWN
@@ -627,7 +693,6 @@ def tor_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
-
     if context.args and context.args[0].lower() == "change":
         update.message.reply_text("🔄 Смена Tor IP...")
         renew_tor_ip()
@@ -642,7 +707,7 @@ def tor_command(update, context):
 
     if USE_TOR and tor_running:
         update.message.reply_text(
-            f"🧅 Tor АКТИВЕН\n🌐 IP: {tor_ip}\n🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n📁 {tor_bin}\n⚙️ Процесс: {proc_running}\n\n/tor change",
+            f"🧅 Tor АКТИВЕН\n🌐 IP: {tor_ip}\n🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n📁 {tor_bin}\n⚙️ {proc_running}",
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -651,7 +716,7 @@ def tor_command(update, context):
         if ok:
             update.message.reply_text(f"✅ Tor восстановлен! IP: {get_current_tor_ip()}")
         else:
-            update.message.reply_text("❌ Не удалось. Проверь Dockerfile.")
+            update.message.reply_text("❌ Не удалось. Смотри Deploy Logs.")
 
 def proxy_command(update, context):
     global USE_PROXY
