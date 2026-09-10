@@ -54,10 +54,8 @@ if not BOT_TOKEN or not ADMIN_IDS:
 print(f"✅ Бот запущен! Администраторы: {ADMIN_IDS}")
 
 # ========== ХРАНИЛИЩЕ ID СООБЩЕНИЙ ==========
-# Для каждого админа храним: chat_id и message_id последнего "рабочего" сообщения
-# /start всегда отправляет НОВОЕ сообщение и делает его "закреплённым якорем"
-pinned_messages = {}   # user_id -> (chat_id, message_id) — сообщение со списком команд
-status_messages = {}   # user_id -> (chat_id, message_id) — последнее "редактируемое" сообщение
+pinned_messages = {}   # user_id -> (chat_id, message_id) — закреплённое меню
+status_messages = {}   # user_id -> (chat_id, message_id) — последнее редактируемое
 
 # ========== TOR ==========
 def find_tor_binary():
@@ -608,6 +606,21 @@ def attack_loop():
     print(f"\n🛑 АТАКА ОСТАНОВЛЕНА | Циклов: {attack_cycle}\n")
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СООБЩЕНИЙ ==========
+def safe_delete_message(context, chat_id, message_id):
+    """Безопасно удаляет сообщение, игнорируя ошибки"""
+    try:
+        context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+def delete_user_message(update):
+    """Удаляет сообщение пользователя (его команду)"""
+    try:
+        if update.message:
+            update.message.delete()
+    except Exception:
+        pass
+
 def build_main_menu():
     tor_status = "✅" if USE_TOR and check_tor() else "❌" if USE_TOR else "⚪"
     tor_ip = get_current_tor_ip() if USE_TOR and check_tor() else "-"
@@ -711,14 +724,16 @@ def build_mode_text():
 def reply_or_edit(update, context, text):
     """
     Логика:
-    - Если у админа уже есть сохранённое рабочее сообщение (status_messages),
-      редактируем его.
-    - Иначе отправляем новое и сохраняем id.
-    - Сообщение со списком команд (/start) не трогаем — оно закреплено.
+    - Редактируем сохранённое рабочее сообщение (status_messages).
+    - Если редактирование невозможно — отправляем новое и запоминаем id.
+    - Удаляем команду пользователя, чтобы не мусорить в чате.
     """
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
 
+    # Сначала удаляем сообщение пользователя
+    delete_user_message(update)
+
+    # Пробуем отредактировать существующее рабочее сообщение
     if user_id in status_messages:
         old_chat, old_msg_id = status_messages[user_id]
         try:
@@ -730,68 +745,75 @@ def reply_or_edit(update, context, text):
             )
             return
         except Exception:
-            # Если редактирование не удалось (сообщение удалено, устарело и т.д.)
-            pass
+            # Сообщение могло быть удалено / устарело — забудем его
+            status_messages.pop(user_id, None)
 
-    # Отправляем новое
-    sent = update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    status_messages[user_id] = (sent.chat_id, sent.message_id)
-
-    # Удаляем исходное сообщение пользователя, чтобы чат был чистым
+    # Отправляем новое сообщение
     try:
-        update.message.delete()
-    except Exception:
-        pass
+        sent = context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
+        status_messages[user_id] = (sent.chat_id, sent.message_id)
+    except Exception as e:
+        print(f"⚠️ Не удалось отправить сообщение: {e}")
 
 # ========== КОМАНДЫ ==========
 def start(update, context):
     if update.effective_user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ Нет доступа.")
+        delete_user_message(update)
         return
 
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # Удаляем старое закреплённое сообщение, если есть
+    # Удаляем команду пользователя
+    delete_user_message(update)
+
+    # Удаляем старое закреплённое сообщение (если есть)
     if user_id in pinned_messages:
         old_chat, old_msg_id = pinned_messages[user_id]
         try:
             context.bot.unpin_chat_message(chat_id=old_chat, message_id=old_msg_id)
-            context.bot.delete_message(chat_id=old_chat, message_id=old_msg_id)
         except Exception:
             pass
+        safe_delete_message(context, old_chat, old_msg_id)
+        pinned_messages.pop(user_id, None)
 
-    # Отправляем новое меню и закрепляем
-    sent = update.message.reply_text(
-        build_main_menu(),
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True
-    )
+    # Удаляем старое рабочее сообщение (если есть)
+    if user_id in status_messages:
+        old_chat, old_msg_id = status_messages[user_id]
+        safe_delete_message(context, old_chat, old_msg_id)
+        status_messages.pop(user_id, None)
 
-    pinned_messages[user_id] = (sent.chat_id, sent.message_id)
-    # Сбрасываем "рабочее" сообщение, чтобы следующая команда создала новое
-    status_messages.pop(user_id, None)
-
+    # Отправляем новое меню
     try:
-        context.bot.pin_chat_message(
+        sent = context.bot.send_message(
             chat_id=chat_id,
-            message_id=sent.message_id,
-            disable_notification=True
+            text=build_main_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
         )
-    except Exception:
-        pass
+        pinned_messages[user_id] = (sent.chat_id, sent.message_id)
 
-    # Удаляем команду /start из чата
-    try:
-        update.message.delete()
-    except Exception:
-        pass
+        try:
+            context.bot.pin_chat_message(
+                chat_id=chat_id,
+                message_id=sent.message_id,
+                disable_notification=True
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"⚠️ Ошибка /start: {e}")
 
 def attack_command(update, context):
     global attack_active, attack_phone, attack_cycle, attack_thread, oauth_cycle, flood_wait_active, flood_wait_until
 
     if update.effective_user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ Нет доступа.")
+        delete_user_message(update)
         return
 
     if attack_active:
@@ -840,20 +862,20 @@ def attack_command(update, context):
 def stop_command(update, context):
     global attack_active
     if update.effective_user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ Нет доступа.")
+        delete_user_message(update)
         return
     attack_active = False
     reply_or_edit(update, context, "🛑 *Атака остановлена.*")
 
 def status_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ Нет доступа.")
+        delete_user_message(update)
         return
     reply_or_edit(update, context, build_status_text())
 
 def tor_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ Нет доступа.")
+        delete_user_message(update)
         return
 
     if context.args and context.args[0].lower() == "change":
@@ -907,7 +929,7 @@ def tor_command(update, context):
 def proxy_command(update, context):
     global USE_PROXY
     if update.effective_user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ Нет доступа.")
+        delete_user_message(update)
         return
 
     if not context.args:
@@ -927,7 +949,7 @@ def proxy_command(update, context):
 def mode_command(update, context):
     global CURRENT_MODE
     if update.effective_user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ Нет доступа.")
+        delete_user_message(update)
         return
 
     if not context.args:
@@ -954,7 +976,7 @@ def main():
     print("=" * 50)
 
     try:
-        r = requests.get(
+        requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true",
             timeout=10
         )
@@ -982,6 +1004,10 @@ def main():
         err = context.error
         if "Conflict" in str(err):
             print("⚠️ Конфликт getUpdates — вероятно, запущен второй экземпляр бота")
+            return
+        if "Message to delete not found" in str(err):
+            return
+        if "Message can't be deleted" in str(err):
             return
         print(f"❌ Ошибка: {err}")
 
