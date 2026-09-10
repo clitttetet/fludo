@@ -35,7 +35,6 @@ CHANGE_IP_EVERY_REQUEST = True
 PROXY_TIMEOUT = 25
 ENCRYPT_IP = True
 
-# Railway: пишем всё в /tmp — там всегда есть права
 TOR_DATA_DIR = "/tmp/tor_data"
 TOR_TORRC_PATH = "/tmp/torrc"
 TOR_LOG_PATH = "/tmp/tor.log"
@@ -53,6 +52,12 @@ if not BOT_TOKEN or not ADMIN_IDS:
     sys.exit(1)
 
 print(f"✅ Бот запущен! Администраторы: {ADMIN_IDS}")
+
+# ========== ХРАНИЛИЩЕ ID СООБЩЕНИЙ ==========
+# Для каждого админа храним: chat_id и message_id последнего "рабочего" сообщения
+# /start всегда отправляет НОВОЕ сообщение и делает его "закреплённым якорем"
+pinned_messages = {}   # user_id -> (chat_id, message_id) — сообщение со списком команд
+status_messages = {}   # user_id -> (chat_id, message_id) — последнее "редактируемое" сообщение
 
 # ========== TOR ==========
 def find_tor_binary():
@@ -76,7 +81,6 @@ def kill_tor_processes():
         pass
 
 def write_torrc():
-    """Пишем torrc в /tmp — там всегда есть права на запись"""
     try:
         os.makedirs(TOR_DATA_DIR, exist_ok=True)
         with open(TOR_TORRC_PATH, "w") as f:
@@ -94,7 +98,6 @@ def write_torrc():
         return False
 
 def start_tor():
-    """Запускаем Tor напрямую, лог читаем сразу"""
     tor_bin = find_tor_binary()
     if not tor_bin:
         print("❌ Бинарник tor не найден")
@@ -106,7 +109,6 @@ def start_tor():
 
     write_torrc()
 
-    # Чистим старые логи
     try:
         if os.path.exists(TOR_LOG_PATH):
             os.remove(TOR_LOG_PATH)
@@ -117,7 +119,6 @@ def start_tor():
     print(f"🚀 Запуск Tor: {' '.join(args)}")
 
     try:
-        # stderr+stdout в один пайп
         proc = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -127,7 +128,6 @@ def start_tor():
             bufsize=1,
         )
 
-        # Читаем первые строки лога в отдельном потоке, чтобы не блокировать
         def dump_log():
             try:
                 for line in proc.stdout:
@@ -137,11 +137,9 @@ def start_tor():
 
         threading.Thread(target=dump_log, daemon=True).start()
 
-        # Даём Tor 8 секунд, проверяем, что не упал
         time.sleep(8)
         if proc.poll() is not None:
             print(f"❌ Tor упал с кодом {proc.returncode}")
-            # Покажем лог, если есть
             try:
                 if os.path.exists(TOR_LOG_PATH):
                     with open(TOR_LOG_PATH) as f:
@@ -158,15 +156,12 @@ def start_tor():
         return False
 
 def wait_for_tor_ready(timeout=120):
-    """Ждём открытия SOCKS5-порта, параллельно проверяя, что процесс жив"""
     print(f"⏳ Ожидание SOCKS5 на {TOR_SOCKS_HOST}:{TOR_SOCKS_PORT} (до {timeout} сек)...")
     start = time.time()
     while time.time() - start < timeout:
-        # Если процесс умер — выходим сразу
         if not is_tor_process_running():
             print("❌ Процесс Tor умер во время ожидания")
             return False
-
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2)
@@ -178,7 +173,6 @@ def wait_for_tor_ready(timeout=120):
             time.sleep(2)
 
     print("❌ SOCKS5 порт не открылся за отведённое время")
-    # Печатаем лог файла
     try:
         if os.path.exists(TOR_LOG_PATH):
             with open(TOR_LOG_PATH) as f:
@@ -199,7 +193,6 @@ def ensure_tor():
         return False
     print(f"✅ Tor: {tor_bin}")
 
-    # Если уже слушает — ничего не делаем
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2)
@@ -210,7 +203,6 @@ def ensure_tor():
     except Exception:
         pass
 
-    # Чистим старые процессы и запускаем заново
     kill_tor_processes()
     time.sleep(1)
 
@@ -221,7 +213,6 @@ def ensure_tor():
         print("⚠️ Первая попытка не удалась, перезапускаю Tor...")
         kill_tor_processes()
         time.sleep(2)
-        # Чистим data на случай битого state
         try:
             shutil.rmtree(TOR_DATA_DIR, ignore_errors=True)
         except Exception:
@@ -616,17 +607,185 @@ def attack_loop():
 
     print(f"\n🛑 АТАКА ОСТАНОВЛЕНА | Циклов: {attack_cycle}\n")
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СООБЩЕНИЙ ==========
+def build_main_menu():
+    tor_status = "✅" if USE_TOR and check_tor() else "❌" if USE_TOR else "⚪"
+    tor_ip = get_current_tor_ip() if USE_TOR and check_tor() else "-"
+    mode_str = {"codes": "КОДЫ", "registration": "REG", "mix": "МИКС"}.get(CURRENT_MODE, CURRENT_MODE)
+
+    return (
+        f"🤖 *Telegram Flooder Bot — Railway Edition*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🧅 *Tor:* {tor_status}  |  IP: `{tor_ip}`\n"
+        f"🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n"
+        f"🎮 Режим: `{mode_str}`\n"
+        f"🌐 Прокси: `{'ВКЛ' if USE_PROXY else 'ВЫКЛ'}`\n"
+        f"🔄 Смена IP: `{'ВКЛ' if CHANGE_IP_EVERY_REQUEST else 'ВЫКЛ'}`\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📱 *Атака:*\n"
+        f"`/attack +79991234567` — запуск\n"
+        f"`/stop` — остановить\n"
+        f"`/status` — статус атаки\n\n"
+        f"🧅 *Tor:*\n"
+        f"`/tor` — статус Tor\n"
+        f"`/tor change` — сменить IP\n\n"
+        f"🌐 *Прокси:*\n"
+        f"`/proxy on|off` — вкл/выкл\n\n"
+        f"🎮 *Режим:*\n"
+        f"`/mode codes|reg|mix` — режим атаки\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 Напиши команду — я отредактирую это сообщение"
+    )
+
+def build_status_text():
+    if not attack_active:
+        return (
+            f"⚪ *Атака не запущена*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Используй `/attack +79991234567` чтобы начать."
+        )
+    runtime = int(time.time() - attack_start_time) if attack_start_time else 0
+    tor_ip = get_current_tor_ip() if USE_TOR and check_tor() else "Tor не активен"
+    flood_status = f"⏳ Flood wait: `{int(flood_wait_until - time.time())} сек`" if flood_wait_active and time.time() < flood_wait_until else "✅ Нет flood wait"
+    return (
+        f"🟢 *Атака активна*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📱 Номер: `{attack_phone}`\n"
+        f"🔄 Циклов: `{attack_cycle}`\n"
+        f"🌍 OAuth: `{oauth_cycle}`\n"
+        f"⏱️ Время: `{runtime//60}:{runtime%60:02d}`\n"
+        f"🧅 Tor IP: `{tor_ip}`\n"
+        f"🌊 {flood_status}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💪 *Атака продолжается бесконечно!*"
+    )
+
+def build_tor_text():
+    tor_running = check_tor() if USE_TOR else False
+    tor_ip = get_current_tor_ip() if USE_TOR and tor_running else "-"
+    tor_bin = find_tor_binary() or "не найден"
+    proc_running = "✅" if is_tor_process_running() else "❌"
+
+    if USE_TOR and tor_running:
+        return (
+            f"🧅 *Tor АКТИВЕН*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 IP: `{tor_ip}`\n"
+            f"🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n"
+            f"📁 Бинарник: `{tor_bin}`\n"
+            f"⚙️ Процесс: {proc_running}\n"
+            f"🔄 Смена IP: `{'ВКЛ' if CHANGE_IP_EVERY_REQUEST else 'ВЫКЛ'}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"`/tor change` — сменить IP"
+        )
+    else:
+        return (
+            f"⚠️ *Tor не отвечает*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📁 Бинарник: `{tor_bin}`\n"
+            f"⚙️ Процесс: {proc_running}"
+        )
+
+def build_proxy_text():
+    return (
+        f"🌐 *Прокси*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Статус: `{'ВКЛЮЧЕНЫ' if USE_PROXY else 'ВЫКЛЮЧЕНЫ'}`\n"
+        f"В пуле: `{len(PROXY_POOL)}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"`/proxy on` — включить\n"
+        f"`/proxy off` — выключить"
+    )
+
+def build_mode_text():
+    return (
+        f"🎮 *Режим атаки*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Текущий: `{CURRENT_MODE}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"`/mode codes` — только коды\n"
+        f"`/mode reg` — только OAuth\n"
+        f"`/mode mix` — микс"
+    )
+
+def reply_or_edit(update, context, text):
+    """
+    Логика:
+    - Если у админа уже есть сохранённое рабочее сообщение (status_messages),
+      редактируем его.
+    - Иначе отправляем новое и сохраняем id.
+    - Сообщение со списком команд (/start) не трогаем — оно закреплено.
+    """
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if user_id in status_messages:
+        old_chat, old_msg_id = status_messages[user_id]
+        try:
+            context.bot.edit_message_text(
+                chat_id=old_chat,
+                message_id=old_msg_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        except Exception:
+            # Если редактирование не удалось (сообщение удалено, устарело и т.д.)
+            pass
+
+    # Отправляем новое
+    sent = update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    status_messages[user_id] = (sent.chat_id, sent.message_id)
+
+    # Удаляем исходное сообщение пользователя, чтобы чат был чистым
+    try:
+        update.message.delete()
+    except Exception:
+        pass
+
 # ========== КОМАНДЫ ==========
 def start(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
-    tor_status = "✅" if USE_TOR and check_tor() else "❌" if USE_TOR else "⚪"
-    tor_ip = get_current_tor_ip() if USE_TOR and check_tor() else "-"
-    update.message.reply_text(
-        f"🤖 *Bot Railway*\n\n🧅 Tor: {tor_status}\n🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n🟢 IP: {tor_ip}\n\n/attack +79991234567\n/stop\n/status\n/tor\n/tor change",
-        parse_mode=ParseMode.MARKDOWN
+
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # Удаляем старое закреплённое сообщение, если есть
+    if user_id in pinned_messages:
+        old_chat, old_msg_id = pinned_messages[user_id]
+        try:
+            context.bot.unpin_chat_message(chat_id=old_chat, message_id=old_msg_id)
+            context.bot.delete_message(chat_id=old_chat, message_id=old_msg_id)
+        except Exception:
+            pass
+
+    # Отправляем новое меню и закрепляем
+    sent = update.message.reply_text(
+        build_main_menu(),
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True
     )
+
+    pinned_messages[user_id] = (sent.chat_id, sent.message_id)
+    # Сбрасываем "рабочее" сообщение, чтобы следующая команда создала новое
+    status_messages.pop(user_id, None)
+
+    try:
+        context.bot.pin_chat_message(
+            chat_id=chat_id,
+            message_id=sent.message_id,
+            disable_notification=True
+        )
+    except Exception:
+        pass
+
+    # Удаляем команду /start из чата
+    try:
+        update.message.delete()
+    except Exception:
+        pass
 
 def attack_command(update, context):
     global attack_active, attack_phone, attack_cycle, attack_thread, oauth_cycle, flood_wait_active, flood_wait_until
@@ -634,16 +793,18 @@ def attack_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
+
     if attack_active:
-        update.message.reply_text("⚠️ Атака уже запущена!")
+        reply_or_edit(update, context, "⚠️ *Атака уже запущена!*\nИспользуй `/stop` чтобы остановить.")
         return
+
     if not context.args:
-        update.message.reply_text("❌ /attack +79991234567")
+        reply_or_edit(update, context, "❌ *Формат:* `/attack +79991234567`")
         return
 
     phone = context.args[0]
     if not phone.startswith('+') or not phone[1:].replace(' ', '').isdigit():
-        update.message.reply_text("❌ Формат: +79991234567")
+        reply_or_edit(update, context, "❌ *Формат:* `/attack +79991234567`")
         return
 
     attack_active = True
@@ -660,7 +821,17 @@ def attack_command(update, context):
     else:
         tor_ip = "Tor не активен"
 
-    update.message.reply_text(f"✅ Атака на {phone}\n🧅 Tor IP: {tor_ip}\n⏹️ /stop", parse_mode=ParseMode.MARKDOWN)
+    text = (
+        f"✅ *Атака запущена*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📱 Номер: `{phone}`\n"
+        f"🧅 Tor IP: `{tor_ip}`\n"
+        f"💪 *Не остановится при FloodWait*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏹️ `/stop` — остановить\n"
+        f"📊 `/status` — статус"
+    )
+    reply_or_edit(update, context, text)
 
     attack_thread = threading.Thread(target=attack_loop)
     attack_thread.daemon = False
@@ -672,95 +843,124 @@ def stop_command(update, context):
         update.message.reply_text("❌ Нет доступа.")
         return
     attack_active = False
-    update.message.reply_text("🛑 Атака остановлена.")
+    reply_or_edit(update, context, "🛑 *Атака остановлена.*")
 
 def status_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
-    if attack_active:
-        runtime = int(time.time() - attack_start_time) if attack_start_time else 0
-        tor_ip = get_current_tor_ip() if USE_TOR and check_tor() else "Tor не активен"
-        flood_status = f"⏳ {int(flood_wait_until - time.time())} сек" if flood_wait_active and time.time() < flood_wait_until else "✅ Нет flood wait"
-        update.message.reply_text(
-            f"🟢 Атака активна\n📱 {attack_phone}\n🔄 Циклов: {attack_cycle}\n🌍 OAuth: {oauth_cycle}\n⏱️ {runtime//60}:{runtime%60:02d}\n🧅 {tor_ip}\n🌊 {flood_status}",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        update.message.reply_text("⚪ Атака не запущена.")
+    reply_or_edit(update, context, build_status_text())
 
 def tor_command(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
+
     if context.args and context.args[0].lower() == "change":
-        update.message.reply_text("🔄 Смена Tor IP...")
+        reply_or_edit(update, context, "🔄 *Смена Tor IP...*")
         renew_tor_ip()
         time.sleep(3)
-        update.message.reply_text(f"✅ Новый IP: {get_current_tor_ip()}")
+        new_ip = get_current_tor_ip()
+        reply_or_edit(update, context,
+            f"✅ *Tor IP изменён*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🧅 Новый IP: `{new_ip}`"
+        )
+        return
+
+    if context.args and context.args[0].lower() == "reinstall":
+        reply_or_edit(update, context, "🔄 *Переустановка Tor...*")
+        kill_tor_processes()
+        try:
+            shutil.rmtree(TOR_DATA_DIR, ignore_errors=True)
+        except Exception:
+            pass
+        ok = ensure_tor()
+        if ok:
+            reply_or_edit(update, context,
+                f"✅ *Tor переустановлен*\n🧅 IP: `{get_current_tor_ip()}`"
+            )
+        else:
+            reply_or_edit(update, context, "❌ *Не удалось переустановить Tor*")
         return
 
     tor_running = check_tor() if USE_TOR else False
-    tor_ip = get_current_tor_ip() if USE_TOR and tor_running else "-"
-    tor_bin = find_tor_binary() or "не найден"
-    proc_running = "✅" if is_tor_process_running() else "❌"
-
-    if USE_TOR and tor_running:
-        update.message.reply_text(
-            f"🧅 Tor АКТИВЕН\n🌐 IP: {tor_ip}\n🧅 SOCKS5: `{TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}`\n📁 {tor_bin}\n⚙️ {proc_running}",
-            parse_mode=ParseMode.MARKDOWN
+    if not tor_running and USE_TOR:
+        reply_or_edit(update, context,
+            f"⚠️ *Tor не отвечает*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📁 Бинарник: `{find_tor_binary() or 'не найден'}`\n"
+            f"⚙️ Процесс: {'✅' if is_tor_process_running() else '❌'}\n\n"
+            f"🔄 *Восстанавливаю...*"
         )
-    else:
-        update.message.reply_text(f"⚠️ Tor не отвечает\n📁 {tor_bin}\n⚙️ {proc_running}\n\n🔄 Восстанавливаю...")
         ok = ensure_tor()
         if ok:
-            update.message.reply_text(f"✅ Tor восстановлен! IP: {get_current_tor_ip()}")
+            reply_or_edit(update, context,
+                f"✅ *Tor восстановлен*\n🧅 IP: `{get_current_tor_ip()}`"
+            )
         else:
-            update.message.reply_text("❌ Не удалось. Смотри Deploy Logs.")
+            reply_or_edit(update, context, "❌ *Не удалось восстановить Tor*")
+        return
+
+    reply_or_edit(update, context, build_tor_text())
 
 def proxy_command(update, context):
     global USE_PROXY
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
+
     if not context.args:
-        update.message.reply_text(f"🌐 Прокси: {'вкл' if USE_PROXY else 'выкл'}")
+        reply_or_edit(update, context, build_proxy_text())
         return
-    if context.args[0].lower() == "on":
+
+    arg = context.args[0].lower()
+    if arg == "on":
         USE_PROXY = True
-        update.message.reply_text("✅ Прокси ВКЛ")
-    elif context.args[0].lower() == "off":
+        reply_or_edit(update, context, "✅ *Прокси ВКЛЮЧЕНЫ*")
+    elif arg == "off":
         USE_PROXY = False
-        update.message.reply_text("✅ Прокси ВЫКЛ")
+        reply_or_edit(update, context, "✅ *Прокси ВЫКЛЮЧЕНЫ*")
     else:
-        update.message.reply_text("❌ /proxy on|off")
+        reply_or_edit(update, context, "❌ *Формат:* `/proxy on|off`")
 
 def mode_command(update, context):
     global CURRENT_MODE
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("❌ Нет доступа.")
         return
+
     if not context.args:
-        update.message.reply_text(f"Режим: {CURRENT_MODE}")
+        reply_or_edit(update, context, build_mode_text())
         return
+
     mode = context.args[0].lower()
     if mode == "codes":
         CURRENT_MODE = MODE_ONLY_CODES
-        update.message.reply_text("✅ CODES")
+        reply_or_edit(update, context, "✅ *Режим:* `КОДЫ`")
     elif mode == "reg":
         CURRENT_MODE = MODE_ONLY_REG
-        update.message.reply_text("✅ REG")
+        reply_or_edit(update, context, "✅ *Режим:* `OAuth`")
     elif mode == "mix":
         CURRENT_MODE = MODE_MIX
-        update.message.reply_text("✅ MIX")
+        reply_or_edit(update, context, "✅ *Режим:* `МИКС`")
     else:
-        update.message.reply_text("❌ /mode codes|reg|mix")
+        reply_or_edit(update, context, "❌ *Формат:* `/mode codes|reg|mix`")
 
 # ========== ЗАПУСК ==========
 def main():
     print("\n" + "=" * 50)
     print("🤖 Bot - Railway Edition")
     print("=" * 50)
+
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true",
+            timeout=10
+        )
+        print("✅ Webhook сброшен, старые апдейты очищены")
+    except Exception as e:
+        print(f"⚠️ Не удалось сбросить webhook: {e}")
 
     if USE_TOR:
         ensure_tor()
@@ -769,6 +969,7 @@ def main():
 
     updater = Updater(token=BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
+
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("attack", attack_command))
     dp.add_handler(CommandHandler("stop", stop_command))
@@ -777,7 +978,20 @@ def main():
     dp.add_handler(CommandHandler("proxy", proxy_command))
     dp.add_handler(CommandHandler("mode", mode_command))
 
-    updater.start_polling()
+    def error_handler(update, context):
+        err = context.error
+        if "Conflict" in str(err):
+            print("⚠️ Конфликт getUpdates — вероятно, запущен второй экземпляр бота")
+            return
+        print(f"❌ Ошибка: {err}")
+
+    dp.add_error_handler(error_handler)
+
+    updater.start_polling(
+        clean=True,
+        bootstrap_retries=-1,
+        timeout=30,
+    )
     updater.idle()
 
 if __name__ == "__main__":
